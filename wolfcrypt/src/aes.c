@@ -1662,8 +1662,8 @@ static WARN_UNUSED_RESULT WC_INLINE word32 PreFetchTe(void)
 
     for (i = 0; i < 4; i++) {
         /* 256 elements, each one is 4 bytes */
-        for (j = 0; j < 256; j += WC_CACHE_LINE_SZ/4) {
-            x &= Te[i][j];
+        for (j = 0; j < 256; j++) {
+            x &= Te[i][j] & (~(!(j%(WC_CACHE_LINE_SZ/4)) - 1));
         }
     }
     return x;
@@ -1679,8 +1679,8 @@ static WARN_UNUSED_RESULT WC_INLINE word32 PreFetchSBox(void)
     word32 x = 0;
     int i;
 
-    for (i = 0; i < 256; i += WC_CACHE_LINE_SZ/4) {
-        x &= Tsbox[i];
+    for (i = 0; i < 256; i++) {
+        x &= Tsbox[i] & (~(!(i%(WC_CACHE_LINE_SZ/4)) - 1));
     }
     return x;
 #else
@@ -1714,6 +1714,92 @@ static WARN_UNUSED_RESULT WC_INLINE word32 PreFetchSBox(void)
 #else
     #error Cache line size not supported
 #endif
+static void AEST_HELPER(word32* t0, word32* t1, word32* t2, word32* t3,
+    word32 s0, word32 s1, word32 s2, word32 s3, const word32* rk)
+{
+    int i;
+    byte t00Mask, t01Mask, t02Mask, t03Mask;
+    byte t10Mask, t11Mask, t12Mask, t13Mask;
+    byte t20Mask, t21Mask, t22Mask, t23Mask;
+    byte t30Mask, t31Mask, t32Mask, t33Mask;
+
+    t00Mask = GETBYTE(s0, 3);
+    t01Mask = GETBYTE(s1, 2);
+    t02Mask = GETBYTE(s2, 1);
+    t03Mask = GETBYTE(s3, 0);
+
+    t10Mask = GETBYTE(s1, 3);
+    t11Mask = GETBYTE(s2, 2);
+    t12Mask = GETBYTE(s3, 1);
+    t13Mask = GETBYTE(s0, 0);
+
+    t20Mask = GETBYTE(s2, 3);
+    t21Mask = GETBYTE(s3, 2);
+    t22Mask = GETBYTE(s0, 1);
+    t23Mask = GETBYTE(s1, 0);
+
+    t30Mask = GETBYTE(s3, 3);
+    t31Mask = GETBYTE(s0, 2);
+    t32Mask = GETBYTE(s1, 1);
+    t33Mask = GETBYTE(s2, 0);
+
+    *t0 = 0;
+    *t1 = 0;
+    *t2 = 0;
+    *t3 = 0;
+
+#ifndef WC_NO_CACHE_RESISTANT
+    for (i = 0; i < 256; i++) {
+        word32 v0 = Te[0][i];
+        word32 v1 = Te[1][i];
+        word32 v2 = Te[2][i];
+        word32 v3 = Te[3][i];
+
+        *t0 ^= (v0 & ~(!(i^t00Mask)-1));
+        *t0 ^= (v1 & ~(!(i^t01Mask)-1));
+        *t0 ^= (v2 & ~(!(i^t02Mask)-1));
+        *t0 ^= (v3 & ~(!(i^t03Mask)-1));
+
+        *t1 ^= (v0 & ~(!(i^t10Mask)-1));
+        *t1 ^= (v1 & ~(!(i^t11Mask)-1));
+        *t1 ^= (v2 & ~(!(i^t12Mask)-1));
+        *t1 ^= (v3 & ~(!(i^t13Mask)-1));
+
+        *t2 ^= (v0 & ~(!(i^t20Mask)-1));
+        *t2 ^= (v1 & ~(!(i^t21Mask)-1));
+        *t2 ^= (v2 & ~(!(i^t22Mask)-1));
+        *t2 ^= (v3 & ~(!(i^t23Mask)-1));
+
+        *t3 ^= (v0 & ~(!(i^t30Mask)-1));
+        *t3 ^= (v1 & ~(!(i^t31Mask)-1));
+        *t3 ^= (v2 & ~(!(i^t32Mask)-1));
+        *t3 ^= (v3 & ~(!(i^t33Mask)-1));
+    }
+    *t0 ^= rk[0];
+    *t1 ^= rk[1];
+    *t2 ^= rk[2];
+    *t3 ^= rk[3];
+#else
+    *t0 = Te[0][t00Mask] ^ Te[1][t01Mask] ^ Te[2][t02Mask]
+            ^ Te[3][t03Mask] ^ rk[0];
+    *t1 = Te[0][t10Mask] ^ Te[1][t11Mask] ^ Te[2][t12Mask]
+            ^ Te[3][t13Mask] ^ rk[1];
+    *t2 = Te[0][t20Mask] ^ Te[1][t21Mask] ^ Te[2][t22Mask]
+            ^ Te[3][t23Mask] ^ rk[1];
+    *t1 = Te[0][t10Mask] ^ Te[1][t11Mask] ^ Te[2][t12Mask]
+            ^ Te[3][t13Mask] ^ rk[1];
+#endif
+}
+
+
+/* Software AES - ECB Encrypt */
+static WARN_UNUSED_RESULT int wc_AesEncrypt(
+    Aes* aes, const byte* inBlock, byte* outBlock)
+{
+    word32 s0, s1, s2, s3;
+    word32 t0, t1, t2, t3;
+    word32 r = aes->rounds >> 1;
+    const word32* rk = aes->key;
 
 #ifndef WOLFSSL_AES_SMALL_TABLES
 static word32 GetTable(const word32* t, byte o)
@@ -2013,10 +2099,22 @@ static void AesEncrypt_C(Aes* aes, const byte* inBlock, byte* outBlock,
     ENC_ROUND_S_T(16); ENC_ROUND_T_S(16);
     ENC_ROUND_S_T(24); ENC_ROUND_T_S(24);
     ENC_ROUND_S_T(32); ENC_ROUND_T_S(32);
+    AEST_HELPER(&t0, &t1, &t2, &t3, s0, s1, s2, s3, rk + 4);
+    AEST_HELPER(&s0, &s1, &s2, &s3, t0, t1, t2, t3, rk + 8);
+    AEST_HELPER(&t0, &t1, &t2, &t3, s0, s1, s2, s3, rk + 12);
+    AEST_HELPER(&s0, &s1, &s2, &s3, t0, t1, t2, t3, rk + 16);
+    AEST_HELPER(&t0, &t1, &t2, &t3, s0, s1, s2, s3, rk + 20);
+    AEST_HELPER(&s0, &s1, &s2, &s3, t0, t1, t2, t3, rk + 24);
+    AEST_HELPER(&t0, &t1, &t2, &t3, s0, s1, s2, s3, rk + 28);
+    AEST_HELPER(&s0, &s1, &s2, &s3, t0, t1, t2, t3, rk + 32);
+    AEST_HELPER(&t0, &t1, &t2, &t3, s0, s1, s2, s3, rk + 36);
+
     if (r > 5) {
-        ENC_ROUND_S_T(40); ENC_ROUND_T_S(40);
+        AEST_HELPER(&s0, &s1, &s2, &s3, t0, t1, t2, t3, rk + 40);
+        AEST_HELPER(&t0, &t1, &t2, &t3, s0, s1, s2, s3, rk + 44);
         if (r > 6) {
-            ENC_ROUND_S_T(48); ENC_ROUND_T_S(48);
+            AEST_HELPER(&s0, &s1, &s2, &s3, t0, t1, t2, t3, rk + 48);
+            AEST_HELPER(&t0, &t1, &t2, &t3, s0, s1, s2, s3, rk + 52);
         }
     }
     rk += r * 8;
